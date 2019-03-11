@@ -49,11 +49,12 @@ def main():
     parser.add_argument('src_embeddings', help='the source language embeddings')
     parser.add_argument('trg_embeddings', help='the target language embeddings')
     parser.add_argument('-d', '--dictionary', default=sys.stdin.fileno(), help='the test dictionary file (defaults to stdin)')
-    parser.add_argument('--retrieval', default='nn', choices=['nn', 'invnn', 'invsoftmax', 'csls'], help='the retrieval method (nn: standard nearest neighbor; invnn: inverted nearest neighbor; invsoftmax: inverted softmax; csls: cross-domain similarity local scaling)')
+    parser.add_argument('--retrieval', default='nn', choices=['nn', 'topk', 'invnn', 'invsoftmax', 'csls'], help='the retrieval method (nn: standard nearest neighbor; invnn: inverted nearest neighbor; invsoftmax: inverted softmax; csls: cross-domain similarity local scaling)')
     parser.add_argument('--inv_temperature', default=1, type=float, help='the inverse temperature (only compatible with inverted softmax)')
     parser.add_argument('--inv_sample', default=None, type=int, help='use a random subset of the source vocabulary for the inverse computations (only compatible with inverted softmax)')
     parser.add_argument('-k', '--neighborhood', default=10, type=int, help='the neighborhood size (only compatible with csls)')
     parser.add_argument('--dot', action='store_true', help='use the dot product in the similarity computations instead of the cosine')
+    # parser.add_argument('--mean', action='store_true', help='Mean center the target.')
     parser.add_argument('--encoding', default='utf-8', help='the character encoding for input/output (defaults to utf-8)')
     parser.add_argument('--seed', type=int, default=0, help='the random seed')
     parser.add_argument('--precision', choices=['fp16', 'fp32', 'fp64'], default='fp32', help='the floating-point precision (defaults to fp32)')
@@ -67,6 +68,9 @@ def main():
         dtype = 'float32'
     elif args.precision == 'fp64':
         dtype = 'float64'
+
+    # KNN neighborhood for MRR.
+    knn = args.neighborhood
 
     # Read input embeddings
     srcfile = open(args.src_embeddings, encoding=args.encoding, errors='surrogateescape')
@@ -91,6 +95,13 @@ def main():
         embeddings.length_normalize(x)
         embeddings.length_normalize(z)
 
+    # if args.mean:
+    #     print(args.mean)
+    #     print("Mean Center....")
+    #     embeddings.mean_center(x)
+    #     embeddings.mean_center(z)
+
+
     # Build word to index map
     src_word2ind = {word: i for i, word in enumerate(src_words)}
     trg_word2ind = {word: i for i, word in enumerate(trg_words)}
@@ -98,6 +109,7 @@ def main():
     # Read dictionary and compute coverage
     f = open(args.dictionary, encoding=args.encoding, errors='surrogateescape')
     src2trg = collections.defaultdict(set)
+    count = 0
     oov = set()
     vocab = set()
     for line in f:
@@ -114,14 +126,14 @@ def main():
     coverage = len(src2trg) / (len(src2trg) + len(oov))
 
     # Find translations
-    translation = collections.defaultdict(int)
+    translation = collections.defaultdict(list)
     if args.retrieval == 'nn':  # Standard nearest neighbor
         for i in range(0, len(src), BATCH_SIZE):
             j = min(i + BATCH_SIZE, len(src))
             similarities = x[src[i:j]].dot(z.T)
             nn = similarities.argmax(axis=1).tolist()
             for k in range(j-i):
-                translation[src[i+k]] = nn[k]
+                translation[src[i+k]].append(nn[k])
     elif args.retrieval == 'invnn':  # Inverted nearest neighbor
         best_rank = np.full(len(src), x.shape[0], dtype=int)
         best_sim = np.full(len(src), -100, dtype=dtype)
@@ -138,7 +150,17 @@ def main():
                     if rank < best_rank[l] or (rank == best_rank[l] and sim > best_sim[l]):
                         best_rank[l] = rank
                         best_sim[l] = sim
-                        translation[src[l]] = k
+                        translation[src[l]].append(nn[k])
+    # Added by Ashwinkumar Ganesan.
+    elif args.retrieval == 'topk':  # Calculate mean reciprocal ranking.
+        for i in range(0, len(src), BATCH_SIZE):
+            j = min(i + BATCH_SIZE, len(src))
+            similarities = x[src[i:j]].dot(z.T)
+            nn = similarities.argsort(axis=1).tolist()
+            for k in range(j-i):
+                translation[src[i+k]] = nn[k][-knn: ]
+
+    # Continue as usual.
     elif args.retrieval == 'invsoftmax':  # Inverted softmax
         sample = xp.arange(x.shape[0]) if args.inv_sample is None else xp.random.randint(0, x.shape[0], args.inv_sample)
         partition = xp.zeros(z.shape[0])
@@ -150,7 +172,7 @@ def main():
             p = xp.exp(args.inv_temperature*x[src[i:j]].dot(z.T)) / partition
             nn = p.argmax(axis=1).tolist()
             for k in range(j-i):
-                translation[src[i+k]] = nn[k]
+                translation[src[i+k]].append(nn[k])
     elif args.retrieval == 'csls':  # Cross-domain similarity local scaling
         knn_sim_bwd = xp.zeros(z.shape[0])
         for i in range(0, z.shape[0], BATCH_SIZE):
@@ -161,11 +183,11 @@ def main():
             similarities = 2*x[src[i:j]].dot(z.T) - knn_sim_bwd  # Equivalent to the real CSLS scores for NN
             nn = similarities.argmax(axis=1).tolist()
             for k in range(j-i):
-                translation[src[i+k]] = nn[k]
+                translation[src[i+k]].append(nn[k])
 
     # Compute accuracy
-    accuracy = np.mean([1 if translation[i] in src2trg[i] else 0 for i in src])
-    print('Coverage:{0:7.2%}  Accuracy:{1:7.2%}'.format(coverage, accuracy))
+    accuracy = np.mean([1 if len(set(translation[i]) & set(src2trg[i])) > 0 else 0 for i in src])
+    print('KNN: {0:} Coverage:{1:7.2%}  Accuracy:{2:7.2%}'.format(knn, coverage, np.mean(accuracy)))
 
 
 if __name__ == '__main__':

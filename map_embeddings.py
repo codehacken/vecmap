@@ -128,6 +128,7 @@ def main():
         parser.set_defaults(init_dictionary=args.emnlp2016, orthogonal=True, normalize=['unit', 'center'], batch_size=1000)
     args = parser.parse_args()
 
+
     # Check command line arguments
     if (args.src_dewhiten is not None or args.trg_dewhiten is not None) and not args.whiten:
         print('ERROR: De-whitening requires whitening first', file=sys.stderr)
@@ -146,6 +147,9 @@ def main():
     trgfile = open(args.trg_input, encoding=args.encoding, errors='surrogateescape')
     src_words, x = embeddings.read(srcfile, dtype=dtype)
     trg_words, z = embeddings.read(trgfile, dtype=dtype)
+
+    print("Source Training Size: {}".format(len(src_words)))
+    print("Target Training Size: {}".format(len(trg_words)))
 
     # NumPy/CuPy management
     if args.cuda:
@@ -211,7 +215,7 @@ def main():
             trg_indices.append(trg_word2ind[word])
     else:
         f = open(args.init_dictionary, encoding=args.encoding, errors='surrogateescape')
-        for line in f:
+        for idx, line in enumerate(f):
             src, trg = line.split()
             try:
                 src_ind = src_word2ind[src]
@@ -219,8 +223,10 @@ def main():
                 src_indices.append(src_ind)
                 trg_indices.append(trg_ind)
             except KeyError:
+                print("OOV")
                 print('WARNING: OOV dictionary entry ({0} - {1})'.format(src, trg), file=sys.stderr)
 
+    print("Performing alignment...")
     # Read validation dictionary
     if args.validation is not None:
         f = open(args.validation, encoding=args.encoding, errors='surrogateescape')
